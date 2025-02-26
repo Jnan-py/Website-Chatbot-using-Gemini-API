@@ -3,47 +3,34 @@ import requests
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import numpy as np
-import faiss
-from transformers import DPRQuestionEncoder, DPRContextEncoder, DPRQuestionEncoderTokenizer, DPRContextEncoderTokenizer
 import google.generativeai as genai
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GENAI_API_KEY"))
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-MODEL_DIR = Path("./saved_models")
-MODEL_DIR.mkdir(exist_ok=True)
+embeddings = GoogleGenerativeAIEmbeddings(model = "models/embedding-001")
 
-question_encoder_path = MODEL_DIR / "dpr_question_encoder"
-context_encoder_path = MODEL_DIR / "dpr_context_encoder"
-question_tokenizer_path = MODEL_DIR / "dpr_question_tokenizer"
-context_tokenizer_path = MODEL_DIR / "dpr_context_tokenizer"
+def get_text_chunks(text):
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size = 10000, chunk_overlap = 200)
+    chunks = text_splitter.split_text(text)
+    return chunks
 
-if question_encoder_path.exists():
-    question_encoder = DPRQuestionEncoder.from_pretrained(str(question_encoder_path))
-else:
-    question_encoder = DPRQuestionEncoder.from_pretrained("facebook/dpr-question_encoder-single-nq-base")
-    question_encoder.save_pretrained(str(question_encoder_path))
+def get_vector_store(text_chunks,embeddings):
+    vector_store = FAISS.from_texts(text_chunks, embeddings)
+    vector_store.save_local("faiss_index")
 
-if context_encoder_path.exists():
-    context_encoder = DPRContextEncoder.from_pretrained(str(context_encoder_path))
-else:
-    context_encoder = DPRContextEncoder.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base")
-    context_encoder.save_pretrained(str(context_encoder_path))
+def get_relevant_text(user_query, embeddings):
+    new_db = FAISS.load_local("faiss_index",embeddings)
+    docs = new_db.similarity_search(user_query)
+    context = docs[0].page_content
 
-if question_tokenizer_path.exists():
-    question_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained(str(question_tokenizer_path))
-else:
-    question_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained("facebook/dpr-question_encoder-single-nq-base")
-    question_tokenizer.save_pretrained(str(question_tokenizer_path))
-
-if context_tokenizer_path.exists():
-    context_tokenizer = DPRContextEncoderTokenizer.from_pretrained(str(context_tokenizer_path))
-else:
-    context_tokenizer = DPRContextEncoderTokenizer.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base")
-    context_tokenizer.save_pretrained(str(context_tokenizer_path))
+    return context
 
 def fetch_website_content(url):
     response = requests.get(url)
@@ -78,42 +65,26 @@ def crawl_website(base_url, max_pages=10):
 
     return " ".join(all_content)
 
-def encode_context(content, max_length=512):
-    inputs = context_tokenizer(content, return_tensors="pt", truncation=True, padding=True, max_length=max_length)
-    context_embedding = context_encoder(**inputs).pooler_output.detach().numpy()
-    return context_embedding
-
-def encode_query(query, max_length=512):
-    inputs = question_tokenizer(query, return_tensors="pt", truncation=True, padding=True, max_length=max_length)
-    query_embedding = question_encoder(**inputs).pooler_output.detach().numpy()
-    return query_embedding
-
-def search(query_embedding, context_embeddings, k=5):
-    similarities = np.dot(context_embeddings, query_embedding.T)
-    closest_idx = similarities.argsort(axis=0)[-k:][::-1]
-    return closest_idx
-
-def get_relevant_text(query, context, max_results=2):
-    context_embeddings = [encode_context(c) for c in context]
-    query_embedding = encode_query(query)
-
-    closest_idx = search(query_embedding, np.array(context_embeddings).squeeze(), k=max_results)
-    closest_idx = closest_idx.flatten()
-    relevant_texts = [context[i] for i in closest_idx]
-    return relevant_texts
 
 def bot_response(model, query, relevant_texts):
-    context = ' '.join(relevant_texts)
-    prompt = f"This is the context of the document\nContext: {context}\nAnd this is the user query\nUser: {query}\nAnswer the query with respect to the context provided like a human having a lot of knowledge on the context provided\nBot:"
+    prompt = f"""This is the context of the document 
+    Context: {relevant_texts}
+    And this is the user query
+    User: {query}
+    Answer the query with respect to the context provided (you can use upto 35% of additional knowledge too),
+    like a professional having a lot of knowledge on the context provided
+    Bot:
+    """
     response = model.generate_content(
         prompt,
         generation_config=genai.GenerationConfig(
             temperature=0.7,
-            max_output_tokens=150
+            # max_output_tokens=150
         )
     )
     return response.text
 
+st.set_page_config(page_title="Website ChatBot", layout="wide")
 st.title("Website Chatbot")
 st.markdown("Enter the URL of a website to start chatting with the content!")
 
@@ -141,11 +112,17 @@ if base_url and st.session_state.website_paragraphs is None:
             website_content = crawl_website(base_url)
 
         st.session_state.website_paragraphs = website_content.split('\n')
+        
+        if website_content:
+            chunks = get_text_chunks(website_content)
+            get_vector_store(chunks, embeddings)
+            st.success("Crawled the website successfully!")
 
         st.session_state.messages.append({
             'role': 'assistant',
             'content': "All the information is retrieved, ask your queries, and start the chat!"
         })
+        
     except Exception as e:
         st.error(f"An error occurred: {e}")
 
@@ -171,7 +148,7 @@ if st.session_state.website_paragraphs:
             )
 
             with st.spinner("Generating response..."):
-                relevant_texts = get_relevant_text(user_question, st.session_state.website_paragraphs)
+                relevant_texts = get_relevant_text(user_question, embeddings)
                 bot_reply = bot_response(model, user_question, relevant_texts)
 
             row_a = st.columns(2)
@@ -183,10 +160,10 @@ if st.session_state.website_paragraphs:
             )
 
     except Exception as e:
-        st.chat_message('assistant').markdown('There might be an error, try again')
+        st.chat_message('assistant').markdown(f'There might be an error, try again {str(e)}')
         st.session_state.messages.append(
             {
                 'role': 'assistant',
-                'content': 'There might be an error, try again'
+                'content': f'There might be an error, try again {str(e)}'
             }
         )
