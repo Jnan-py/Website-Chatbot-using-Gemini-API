@@ -127,7 +127,7 @@ if base_url and st.session_state.website_paragraphs is None:
         st.error(f"An error occurred: {e}")
 
 if st.session_state.website_paragraphs:
-    model = genai.GenerativeModel(model_name="gemini-1.5-pro-002")
+    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
 
     for message in st.session_state.messages:
         row = st.columns(2)
