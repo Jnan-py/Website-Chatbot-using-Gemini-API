@@ -26,7 +26,7 @@ def get_vector_store(text_chunks,embeddings):
     vector_store.save_local("faiss_index")
 
 def get_relevant_text(user_query, embeddings):
-    new_db = FAISS.load_local("faiss_index",embeddings)
+    new_db = FAISS.load_local("faiss_index",embeddings, allow_dangerous_deserialization = True)
     docs = new_db.similarity_search(user_query)
     context = docs[0].page_content
 
@@ -71,7 +71,7 @@ def bot_response(model, query, relevant_texts):
     Context: {relevant_texts}
     And this is the user query
     User: {query}
-    Answer the query with respect to the context provided (you can use upto 35% of additional knowledge too),
+    Answer the query with respect to the context provided (you can use upto 50% of your additional knowledge too),
     like a professional having a lot of knowledge on the context provided
     Bot:
     """
